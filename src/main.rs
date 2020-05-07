@@ -6,7 +6,7 @@ use serenity::{
     model::{channel::Message, gateway::Ready},
     prelude::*,
 };
-use std::env;
+use std::{collections::HashSet, env};
 
 struct Handler {
     id_scan_re: Regex,
@@ -21,6 +21,7 @@ impl Handler {
     ) -> impl futures::stream::Stream<Item = IdScanResult> + 'a {
         // spawn concurrent futures
         let (submit, output) = tokio::sync::mpsc::unbounded_channel();
+        let mut seen: HashSet<usize> = HashSet::new();
         let futures: futures::stream::FuturesUnordered<_> = self
             .id_scan_re
             .captures_iter(message)
@@ -29,6 +30,14 @@ impl Handler {
                     .name("id")
                     .map(|id| id.as_str().parse::<usize>().ok())
                     .flatten()
+            })
+            .filter(|id| {
+                if seen.contains(id) {
+                    false
+                } else {
+                    seen.insert(*id);
+                    true
+                }
             })
             .map(|id| {
                 submit_issue_or_pr_from_id(
