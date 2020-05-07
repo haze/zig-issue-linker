@@ -52,6 +52,15 @@ enum IdScanResultType {
     PullRequest,
 }
 
+impl IdScanResultType {
+    fn display(&self) -> &'static str {
+        match self {
+            IdScanResultType::Issue => "Issue",
+            IdScanResultType::PullRequest => "Pull Request",
+        }
+    }
+}
+
 #[derive(Debug)]
 struct IdScanResult {
     kind: IdScanResultType,
@@ -140,12 +149,15 @@ impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
         let mut stream = self.scan_message_for_github_references(&*msg.content).await;
         let mut buf = String::new();
-        let mut result_counter = 0;
+        let mut result_counter: usize = 0;
         let before = std::time::Instant::now();
         while let Some(result) = stream.next().await {
             buf.push_str(&*format!(
-                "{:?} **{}** [{}]({})\n",
-                result.kind, result.id, result.title, result.url
+                "{} **{}** [{}]({})\n",
+                result.kind.display(),
+                result.id,
+                result.title,
+                result.url
             ));
             result_counter += 1;
         }
@@ -161,8 +173,15 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn ready(&self, _: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        use serenity::model::gateway::Activity;
+        use serenity::model::user::OnlineStatus;
         println!("{} is connected!", ready.user.name);
+
+        let activity = Activity::playing("https://github.com/haze/zig-issue-linker");
+        let status = OnlineStatus::Online;
+
+        ctx.set_presence(Some(activity), status).await;
     }
 }
 
