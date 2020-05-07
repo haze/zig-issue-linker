@@ -6,22 +6,31 @@ use serenity::{
     model::{channel::Message, gateway::Ready},
     prelude::*,
 };
-use std::{collections::HashSet, env};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::{mpsc, Mutex};
 
 struct Handler {
     id_scan_re: Regex,
     issue_title_css_selector: Selector,
     pr_title_css_selector: Selector,
+    timeout_map: Arc<Mutex<HashMap<usize, Instant>>>,
 }
 
 impl Handler {
     async fn scan_message_for_github_references<'a>(
         &'a self,
         message: &'a str,
+        timeout_map: &Mutex<HashMap<usize, Instant>>,
     ) -> impl futures::stream::Stream<Item = IdScanResult> + 'a {
         // spawn concurrent futures
-        let (submit, output) = tokio::sync::mpsc::unbounded_channel();
+        let (submit, output) = mpsc::unbounded_channel();
         let mut seen: HashSet<usize> = HashSet::new();
+        let mut timeout_map = timeout_map.lock().await;
         let futures: futures::stream::FuturesUnordered<_> = self
             .id_scan_re
             .captures_iter(message)
@@ -32,10 +41,17 @@ impl Handler {
                     .flatten()
             })
             .filter(|id| {
-                if seen.contains(id) {
+                // if the id is on a cooldown
+                if let Some(time_added) = timeout_map.get(id) {
+                    if time_added.elapsed() >= Duration::from_secs(30) {
+                        timeout_map.remove(id);
+                    }
+                }
+                if timeout_map.contains_key(id) || seen.contains(id) {
                     false
                 } else {
                     seen.insert(*id);
+                    timeout_map.insert(*id, Instant::now());
                     true
                 }
             })
@@ -80,7 +96,7 @@ struct IdScanResult {
 
 async fn submit_issue_or_pr_from_id(
     id: usize,
-    input: tokio::sync::mpsc::UnboundedSender<IdScanResult>,
+    input: mpsc::UnboundedSender<IdScanResult>,
     issue_title_css_selector: &Selector,
     pr_title_css_selector: &Selector,
 ) {
@@ -156,7 +172,9 @@ async fn get_issue_or_pr_from_id(
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
-        let mut stream = self.scan_message_for_github_references(&*msg.content).await;
+        let mut stream = self
+            .scan_message_for_github_references(&*msg.content, &self.timeout_map)
+            .await;
         let mut buf = String::new();
         let mut result_counter: usize = 0;
         let before = std::time::Instant::now();
@@ -217,6 +235,7 @@ async fn main() {
             id_scan_re,
             issue_title_css_selector,
             pr_title_css_selector,
+            timeout_map: Arc::new(Mutex::new(HashMap::new())),
         })
         .await
         .expect("Err creating client");
