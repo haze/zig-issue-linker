@@ -84,6 +84,13 @@ impl IdScanResultType {
             IdScanResultType::PullRequest => "Pull Request",
         }
     }
+
+    fn github_selector(&self) -> &'static str {
+        match self {
+            IdScanResultType::Issue => "issues",
+            IdScanResultType::PullRequest => "pull",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -109,49 +116,25 @@ async fn submit_issue_or_pr_from_id(
     }
 }
 
-async fn get_issue_scan_result(
+async fn get_scan_result(
     id: usize,
-    issue_title_css_selector: &Selector,
+    selector: &Selector,
+    kind: IdScanResultType,
 ) -> Option<IdScanResult> {
-    let url = format!("https://github.com/ziglang/zig/issues/{}", id);
-    let issue_html = surf::get(&url).recv_string().await.ok()?;
-    let issue_document = Html::parse_document(&*issue_html);
-    issue_document
-        .select(issue_title_css_selector)
+    let url = format!(
+        "https://github.com/ziglang/zig/{}/{}",
+        kind.github_selector(),
+        id
+    );
+    let html = surf::get(&url).recv_string().await.ok()?;
+    let document = Html::parse_document(&*html);
+    document
+        .select(selector)
         .next()
-        .map(|element| {
-            element
-                .text()
-                .next()
-                .map(ToString::to_string)
-                .map(|s| s.trim().to_string())
-        })
+        .map(|element| element.text().next().map(|s| s.trim().to_string()))
         .flatten()
         .map(|title| IdScanResult {
-            kind: IdScanResultType::Issue,
-            title,
-            id,
-            url,
-        })
-}
-
-async fn get_pr_scan_result(id: usize, pr_title_css_selector: &Selector) -> Option<IdScanResult> {
-    let url = format!("https://github.com/ziglang/zig/pull/{}", id);
-    let pr_html = surf::get(&url).recv_string().await.ok()?;
-    let pr_document = Html::parse_document(&*pr_html);
-    pr_document
-        .select(pr_title_css_selector)
-        .next()
-        .map(|element| {
-            element
-                .text()
-                .next()
-                .map(ToString::to_string)
-                .map(|s| s.trim().to_string())
-        })
-        .flatten()
-        .map(|title| IdScanResult {
-            kind: IdScanResultType::PullRequest,
+            kind,
             title,
             url,
             id,
@@ -163,9 +146,10 @@ async fn get_issue_or_pr_from_id(
     issue_title_css_selector: &Selector,
     pr_title_css_selector: &Selector,
 ) -> Option<IdScanResult> {
-    match get_issue_scan_result(id, issue_title_css_selector).await {
+    // more likely to be a issue than a pr
+    match get_scan_result(id, issue_title_css_selector, IdScanResultType::Issue).await {
         Some(result) => Some(result),
-        None => get_pr_scan_result(id, pr_title_css_selector).await,
+        None => get_scan_result(id, pr_title_css_selector, IdScanResultType::PullRequest).await,
     }
 }
 
@@ -218,7 +202,7 @@ async fn main() {
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
 
     // compile the issue/pr regex
-    let id_scan_re = regex::Regex::new(r"#(?P<id>\d+)").expect("Failed to compile issue regex");
+    let id_scan_re = regex::Regex::new(r"#(?P<id>\d{2,})").expect("Failed to compile issue regex");
 
     // compile title & pr css selector
     let issue_title_css_selector = Selector::parse(
