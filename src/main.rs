@@ -202,7 +202,8 @@ async fn main() {
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
 
     // compile the issue/pr regex
-    let id_scan_re = regex::Regex::new(r"#(?P<id>\d{2,})").expect("Failed to compile issue regex");
+    let id_scan_re =
+        regex::Regex::new(r"#(?P<id>\d{2,})(\s+|$)").expect("Failed to compile issue regex");
 
     // compile title & pr css selector
     let issue_title_css_selector = Selector::parse(
