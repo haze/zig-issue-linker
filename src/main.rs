@@ -3,7 +3,11 @@ use regex::Regex;
 use scraper::{Html, Selector};
 use serenity::{
     async_trait,
-    model::{channel::Message, gateway::Ready},
+    model::{
+        channel::{Message, ReactionType},
+        gateway::Ready,
+        id::EmojiId,
+    },
     prelude::*,
 };
 use std::{
@@ -156,6 +160,21 @@ async fn get_issue_or_pr_from_id(
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
+        if msg.content.to_ascii_lowercase().contains("fast") {
+            if let Err(why) = msg
+                .react(
+                    &ctx.http,
+                    ReactionType::Custom {
+                        animated: false,
+                        id: EmojiId(712478923388354602),
+                        name: Some(String::from("zigfast")),
+                    },
+                )
+                .await
+            {
+                eprintln!("Failed to zigfast react: {}", &why);
+            }
+        }
         let mut stream = self
             .scan_message_for_github_references(&*msg.content, &self.timeout_map)
             .await;
