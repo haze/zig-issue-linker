@@ -23,6 +23,7 @@ struct Handler {
     issue_title_css_selector: Selector,
     pr_title_css_selector: Selector,
     timeout_map: Arc<Mutex<HashMap<usize, Instant>>>,
+    trigger_words: Vec<(String, ReactionType)>,
 }
 
 impl Handler {
@@ -160,19 +161,13 @@ async fn get_issue_or_pr_from_id(
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
-        if msg.content.to_ascii_lowercase().contains("fast") {
-            if let Err(why) = msg
-                .react(
-                    &ctx.http,
-                    ReactionType::Custom {
-                        animated: false,
-                        id: EmojiId(712478923388354602),
-                        name: Some(String::from("zigfast")),
-                    },
-                )
-                .await
-            {
-                eprintln!("Failed to zigfast react: {}", &why);
+        // Handling triggerwords
+        let msg_lowercase = msg.content.to_ascii_lowercase();
+        for (word, reaction) in &self.trigger_words {
+            if msg_lowercase.contains(word) {
+                if let Err(why) = msg.react(&ctx.http, reaction.clone()).await {
+                    eprintln!("Failed to react: {}", &why);
+                }
             }
         }
         let mut stream = self
@@ -240,6 +235,18 @@ async fn main() {
             issue_title_css_selector,
             pr_title_css_selector,
             timeout_map: Arc::new(Mutex::new(HashMap::new())),
+            trigger_words: vec![
+                (String::from("fast"), ReactionType::Custom {
+                    animated: false,
+                    id: EmojiId(712478923388354602),
+                    name: Some(String::from("zigfast")),
+                }),
+                (String::from("slow"), ReactionType::Custom {
+                    animated: false,
+                    id: EmojiId(722126415901753366),
+                    name: Some(String::from("zigrest")),
+                }),
+            ],
         })
         .await
         .expect("Err creating client");
