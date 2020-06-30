@@ -1,0 +1,3 @@
+[submodule "analysis-buddy"]
+	path = analysis-buddy
+	url = https://github.com/alexnask/analysis-buddy

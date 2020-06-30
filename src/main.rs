@@ -16,16 +16,139 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock as TokioRwLock};
 
 struct Handler {
     id_scan_re: Regex,
+    src_scan_re: Regex,
     issue_title_css_selector: Selector,
     pr_title_css_selector: Selector,
     timeout_map: Arc<Mutex<HashMap<usize, Instant>>>,
+    std_searcher: StdSearcher,
+}
+
+struct StdSearcher {
+    proc_child: Mutex<tokio::process::Child>,
+
+    link_cache: TokioRwLock<HashMap<String, String>>,
+}
+
+struct SearchResult<'a> {
+    pattern: &'a str,
+    link: String,
+}
+
+impl<'a> std::fmt::Display for SearchResult<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}]({})", self.pattern, self.link)
+    }
+}
+
+impl StdSearcher {
+    async fn new() -> Result<StdSearcher, tokio::io::Error> {
+        let mut anal_buddy_command =
+            tokio::process::Command::new("analysis-buddy/zig-cache/bin/anal-buddy");
+        let anal_buddy_command = anal_buddy_command
+            .arg("zig/lib/")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let proc_child = Mutex::new(anal_buddy_command.spawn()?);
+
+        Ok(StdSearcher {
+            proc_child,
+            link_cache: TokioRwLock::new(HashMap::new()),
+        })
+    }
+
+    async fn lookup<'a>(&self, pattern: &'a str, submit: mpsc::UnboundedSender<SearchResult<'a>>) {
+        let pattern = pattern.trim_matches('_');
+        let cache_read_guard = self.link_cache.read().await;
+        if let Some(link) = cache_read_guard.get(pattern) {
+            if let Err(why) = submit.send(SearchResult {
+                pattern,
+                link: link.clone(),
+            }) {
+                eprintln!("Failed to submit found doc link: {}", &why);
+            }
+        } else {
+            drop(cache_read_guard);
+            if let Some(link) = self.search(pattern).await {
+                if let Err(why) = submit.send(SearchResult {
+                    pattern,
+                    link: link.clone(),
+                }) {
+                    eprintln!("Failed to submit found doc link: {}", &why);
+                } else {
+                    let mut cache = self.link_cache.write().await;
+                    cache.insert(pattern.to_string(), link);
+                }
+            } else {
+                eprintln!("Search turned up empty for {:?}", pattern);
+            }
+        }
+    }
+
+    async fn search(&self, pattern: &str) -> Option<String> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let mut proc_child = self.proc_child.lock().await;
+        if let Some(writer) = &mut proc_child.stdin {
+            match writer.write(pattern.as_bytes()).await {
+                Err(why) => {
+                    eprintln!("Failed to send message to StdSearcher: {}", &why);
+                    return None;
+                }
+                _ => {}
+            }
+            match writer.write(&[0xA]).await {
+                Err(why) => {
+                    eprintln!("Failed to send message to StdSearcher: {}", &why);
+                    return None;
+                }
+                _ => {}
+            }
+            drop(writer);
+            if let Some(reader) = &mut proc_child.stdout {
+                let mut buf_reader = tokio::io::BufReader::new(reader);
+                let mut buf = String::with_capacity(128);
+                if let Err(why) = buf_reader.read_line(&mut buf).await {
+                    eprintln!("Failed to read line from StdSearcher stdout: {}", &why);
+                } else {
+                    if buf.trim().is_empty() {
+                        return None;
+                    }
+                    // pop captured newline
+                    buf.pop();
+                    return Some(buf);
+                }
+            } else {
+                eprintln!("No stdout attached! :(");
+            }
+        } else {
+            eprintln!("No stdin attached! :(");
+        }
+        None
+    }
 }
 
 impl Handler {
+    async fn scan_message_for_src_references<'a>(
+        &'a self,
+        message: &'a str,
+    ) -> impl futures::stream::Stream<Item = SearchResult<'a>> + 'a {
+        let (submit, output) = mpsc::unbounded_channel();
+        let futures: futures::stream::FuturesUnordered<_> = self
+            .src_scan_re
+            .captures_iter(message)
+            .filter_map(|m| m.get(0).map(|x| x.as_str()))
+            .map(|m| self.std_searcher.lookup(m, submit.clone()))
+            .collect();
+
+        futures.collect::<Vec<_>>().await;
+
+        output
+    }
+
     async fn scan_message_for_github_references<'a>(
         &'a self,
         message: &'a str,
@@ -72,6 +195,18 @@ impl Handler {
         futures.collect::<Vec<_>>().await;
 
         output
+    }
+}
+
+#[derive(Debug)]
+struct SourceReference<'a> {
+    permalink: String,
+    location: &'a str,
+}
+
+impl<'a> std::fmt::Display for SourceReference<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}]({})", self.location, self.permalink)
     }
 }
 
@@ -175,13 +310,16 @@ impl EventHandler for Handler {
                 eprintln!("Failed to zigfast react: {}", &why);
             }
         }
-        let mut stream = self
+
+        let mut gh_src_stream = self.scan_message_for_src_references(&*msg.content).await;
+        let mut gh_ref_stream = self
             .scan_message_for_github_references(&*msg.content, &self.timeout_map)
             .await;
         let mut buf = String::new();
-        let mut result_counter: usize = 0;
+        let mut ref_result_counter: usize = 0;
+        let mut src_result_counter: usize = 0;
         let before = std::time::Instant::now();
-        while let Some(result) = stream.next().await {
+        while let Some(result) = gh_ref_stream.next().await {
             buf.push_str(&*format!(
                 "{} **{}** [{}]({})\n",
                 result.kind.display(),
@@ -189,10 +327,19 @@ impl EventHandler for Handler {
                 result.title,
                 result.url
             ));
-            result_counter += 1;
+            ref_result_counter += 1;
+        }
+        while let Some(result) = gh_src_stream.next().await {
+            buf.push_str(&*format!("{}\n", result));
+            src_result_counter += 1;
         }
         if !buf.is_empty() {
-            println!("Parsed {} issues in {:?}", result_counter, before.elapsed());
+            println!(
+                "Parsed {} issues & {} source locations in {:?}",
+                ref_result_counter,
+                src_result_counter,
+                before.elapsed()
+            );
             if let Err(why) = msg
                 .channel_id
                 .send_message(&ctx.http, |m| m.embed(|e| e.description(buf)))
@@ -215,14 +362,46 @@ impl EventHandler for Handler {
     }
 }
 
+async fn update_local_zig() -> Result<(), tokio::io::Error> {
+    use tokio::process::Command;
+    match tokio::fs::File::open("./zig").await.map_err(|e| e.kind()) {
+        Err(tokio::io::ErrorKind::NotFound) => {
+            let mut clone_command = Command::new("git");
+            clone_command.args(&["clone", "https://github.com/ziglang/zig"]);
+            let status: std::process::ExitStatus = clone_command.status().await?;
+            if !status.success() {
+                eprintln!("Git clone failed: {}", &status);
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+    let mut update_command = Command::new("git");
+    update_command.current_dir("./zig");
+    update_command.args(&["reset", "--hard", "HEAD"]);
+    let status: std::process::ExitStatus = update_command.status().await?;
+    if !status.success() {
+        eprintln!("Git update failed: {}", &status);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
 
+    if let Err(why) = update_local_zig().await {
+        eprintln!("{}", &why);
+    }
+
     // compile the issue/pr regex
-    let id_scan_re =
-        regex::Regex::new(r"#(?P<id>\d{2,})(\s+|$)").expect("Failed to compile issue regex");
+    let id_scan_re = regex::Regex::new(r"#(?P<id>\d{2,})(\s+|[.!,`?;:]|$)")
+        .expect("Failed to compile issue regex");
+
+    // compile the code scan regex
+    let src_scan_re =
+        regex::Regex::new(r"_(std)(\.(\w+)+)+_").expect("Failed to compile code scan regex");
 
     // compile title & pr css selector
     let issue_title_css_selector = Selector::parse(
@@ -234,17 +413,26 @@ async fn main() {
     )
     .expect("Failed to compile GitHub Title CSS");
 
-    let mut client = Client::new(&token)
-        .event_handler(Handler {
-            id_scan_re,
-            issue_title_css_selector,
-            pr_title_css_selector,
-            timeout_map: Arc::new(Mutex::new(HashMap::new())),
-        })
-        .await
-        .expect("Err creating client");
+    match StdSearcher::new().await {
+        Ok(std_searcher) => {
+            let mut client = Client::new(&token)
+                .event_handler(Handler {
+                    id_scan_re,
+                    src_scan_re,
+                    issue_title_css_selector,
+                    pr_title_css_selector,
+                    timeout_map: Arc::new(Mutex::new(HashMap::new())),
+                    std_searcher,
+                })
+                .await
+                .expect("Err creating client");
 
-    if let Err(why) = client.start().await {
-        println!("Client error: {:?}", why);
+            if let Err(why) = client.start().await {
+                println!("Client error: {:?}", why);
+            }
+        }
+        Err(why) => {
+            eprintln!("Failed to initialize std searcher server: {}", &why);
+        }
     }
 }

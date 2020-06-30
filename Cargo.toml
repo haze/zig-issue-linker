@@ -13,7 +13,7 @@ dotenv = "0.15.0"
 
 [dependencies.tokio]
 version = "0.2.20"
-features = ["macros", "sync"]
+features = ["macros", "sync", "fs", "rt-threaded", "process"]
 
 [dependencies.serenity]
 git = "https://github.com/Lakelezz/serenity/"
