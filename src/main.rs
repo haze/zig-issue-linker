@@ -62,7 +62,7 @@ impl StdSearcher {
     }
 
     async fn lookup<'a>(&self, pattern: &'a str, submit: mpsc::UnboundedSender<SearchResult<'a>>) {
-        let pattern = pattern.trim_matches('_');
+        let pattern = pattern.trim_matches('*');
         let cache_read_guard = self.link_cache.read().await;
         if let Some(link) = cache_read_guard.get(pattern) {
             if let Err(why) = submit.send(SearchResult {
@@ -401,7 +401,7 @@ async fn main() {
 
     // compile the code scan regex
     let src_scan_re =
-        regex::Regex::new(r"_(std)(\.(\w+)+)+_").expect("Failed to compile code scan regex");
+        regex::Regex::new(r"\*(std)(\.(\w+)+)+\*").expect("Failed to compile code scan regex");
 
     // compile title & pr css selector
     let issue_title_css_selector = Selector::parse(
