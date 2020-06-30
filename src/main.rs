@@ -334,15 +334,38 @@ impl EventHandler for Handler {
             src_result_counter += 1;
         }
         if !buf.is_empty() {
-            println!(
-                "Parsed {} issues & {} source locations in {:?}",
-                ref_result_counter,
-                src_result_counter,
-                before.elapsed()
-            );
+            let mut time_spec_buf = String::new();
+            let found_refs = ref_result_counter > 0;
+            if found_refs {
+                time_spec_buf.push_str("Parsed ");
+                time_spec_buf.push_str(&*ref_result_counter.to_string());
+                time_spec_buf.push_str(" issue");
+                if ref_result_counter > 1 {
+                    time_spec_buf.push_str("s ");
+                } else {
+                    time_spec_buf.push(' ');
+                }
+            }
+            if src_result_counter > 0 {
+                if found_refs {
+                    time_spec_buf.push_str("& ");
+                }
+                time_spec_buf.push_str("Found ");
+                time_spec_buf.push_str(&*src_result_counter.to_string());
+                time_spec_buf.push_str(" source location");
+                if src_result_counter > 1 {
+                    time_spec_buf.push_str("s ");
+                } else {
+                    time_spec_buf.push(' ');
+                }
+            }
+            time_spec_buf.push_str(&*format!("in {:?}", before.elapsed()));
+            eprintln!("{}", &time_spec_buf);
             if let Err(why) = msg
                 .channel_id
-                .send_message(&ctx.http, |m| m.embed(|e| e.description(buf)))
+                .send_message(&ctx.http, |m| {
+                    m.embed(|e| e.description(buf).footer(|f| f.text(time_spec_buf)))
+                })
                 .await
             {
                 eprintln!("Failed to send linked issues: {}", &why);
