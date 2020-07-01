@@ -311,6 +311,7 @@ impl EventHandler for Handler {
             }
         }
 
+        let before = std::time::Instant::now();
         let mut gh_src_stream = self.scan_message_for_src_references(&*msg.content).await;
         let mut gh_ref_stream = self
             .scan_message_for_github_references(&*msg.content, &self.timeout_map)
@@ -318,7 +319,6 @@ impl EventHandler for Handler {
         let mut buf = String::new();
         let mut ref_result_counter: usize = 0;
         let mut src_result_counter: usize = 0;
-        let before = std::time::Instant::now();
         while let Some(result) = gh_ref_stream.next().await {
             buf.push_str(&*format!(
                 "{} **{}** [{}]({})\n",
